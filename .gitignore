@@ -1,0 +1,27 @@
+# Node.js dependencies
+node_modules/
+*.config.js
+package-lock.json
+# Playwright test artifacts
+test-results/
+trace.zip
+*.log
+
+# Allure results
+allure-results/
+allure-report/
+playwright-report/
+ArchivedResults/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS-specific files
+.DS_Store
+Thumbs.db

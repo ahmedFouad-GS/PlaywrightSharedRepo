@@ -1,0 +1,168 @@
+trigger: none
+
+jobs:
+- job: PlaywrightRun
+  displayName: "Web Portal Regression"
+  timeoutInMinutes: 540  
+
+  pool:
+    name: <REPLACE_WITH_YOUR_AGENT_POOL_NAME>
+    demands:
+      - agent.name -equals <REPLACE_WITH_YOUR_AGENT_NAME>
+
+  variables:
+    testSummaryFile: 'playwright-report/results.json'
+
+  steps:
+
+  - powershell: |
+      $branch = $env:BUILD_SOURCEBRANCH.Replace("refs/heads/","")
+      Write-Host "Checking if branch '$branch' has an active PR to main..."
+
+      $org = "GSIntegrationTeam"
+      $project = "REMAT"
+      $repo = "RematAutomationTesting"
+
+      $url = "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/pullrequests?searchCriteria.sourceRefName=refs/heads/$branch&searchCriteria.targetRefName=refs/heads/main&searchCriteria.status=active&api-version=7.0"
+
+      $headers = @{
+        Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN"
+      }
+
+      $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+
+      if ($response.value -and $response.value.Count -gt 0) {
+          $prId = $response.value[0].pullRequestId
+          Write-Host "PR detected: $prId"
+
+          Write-Host "##vso[task.setvariable variable=DetectedPR]true"
+          Write-Host "##vso[task.setvariable variable=DetectedPRId]$prId"
+      }
+      else {
+          Write-Host "No PR found for this branch."
+          Write-Host "##vso[task.setvariable variable=DetectedPR]false"
+          Write-Host "##vso[task.setvariable variable=DetectedPRId]$null"
+      }
+    displayName: "Detect Active PR"
+
+  # -----------------------
+  # Setup
+  # -----------------------
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '20.6.1'
+    displayName: 'Install Node.js'
+
+  - powershell: |
+      if (Test-Path "package-lock.json") {
+          Write-Host "package-lock.json exists, running npm ci..."
+          npm ci
+      } else {
+          Write-Host "package-lock.json missing, running npm install..."
+          npm install
+      }
+    displayName: 'Install dependencies'
+
+  - script: npx playwright install
+    displayName: 'Install Playwright browsers'
+
+  - script: npm install -D allure-commandline
+    displayName: 'Install Allure CLI'
+
+  # -----------------------
+  # Run tests
+  # -----------------------
+  - script: |
+      echo Running Playwright Tests...
+      <REPLACE_WITH_YOUR_TEST_COMMAND>
+    displayName: 'Run Playwright Web Tests'
+    continueOnError: true
+
+  # -----------------------
+  # Extract Playwright stats
+  # -----------------------
+  - powershell: |
+      $summaryFile = "$(System.DefaultWorkingDirectory)/playwright-report/results.json"
+
+      if (!(Test-Path $summaryFile)) {
+        Write-Error "No results.json file found!"
+        exit 1
+      }
+
+      $json = Get-Content $summaryFile | ConvertFrom-Json
+
+      $passed = $json.stats.expected + $json.stats.flaky
+      $failed = $json.stats.unexpected
+      $skipped = $json.stats.skipped
+
+      Write-Host "##vso[task.setvariable variable=passedTests]$passed"
+      Write-Host "##vso[task.setvariable variable=failedTests]$failed"
+      Write-Host "##vso[task.setvariable variable=skippedTests]$skipped"
+    displayName: "Extract Test Counts"
+    condition: always()
+
+  #-----------------------
+  # Locate Allure report zip
+  #-----------------------
+  - powershell: |
+      $archivedDir = "$(System.DefaultWorkingDirectory)/ArchivedResults"
+      if (!(Test-Path $archivedDir)) {
+        Write-Error "ArchivedResults folder not found!"
+        exit 1
+      }
+
+      $zip = Get-ChildItem -Path $archivedDir -Filter "*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      if (-not $zip) {
+        Write-Error "No Allure report zip found in ArchivedResults"
+        exit 1
+      }
+
+      Write-Host "Found report: $($zip.FullName)"
+      Write-Host "##vso[task.setvariable variable=allureZipPath]$($zip.FullName)"
+    displayName: "Locate Allure Report Zip"
+    condition: always()
+
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: '$(allureZipPath)'
+      artifactName: 'AllureReportZip'
+    displayName: 'Publish Allure Report Zip'
+    condition: always()
+    
+  # -----------------------
+  # Teams notification
+  # -----------------------
+  - powershell: |
+      # Cairo time
+      $runTime = (Get-Date).ToUniversalTime().AddHours(2).ToString("yyyy-MM-dd HH:mm")
+
+      $runUrl = "<REPLACE_WITH_YOUR_AZURE_DEVOPS_URL>/_build/results?buildId=$env:BUILD_BUILDID"
+      $allureLink = "<REPLACE_WITH_YOUR_AZURE_DEVOPS_URL>/_build/results?buildId=$env:BUILD_BUILDID&view=artifacts&type=publishedArtifacts&artifactName=AllureHtmlReport"
+
+      $prId = "$(DetectedPRId)"
+      if ($prId) {
+        $prUrl = "<REPLACE_WITH_YOUR_AZURE_DEVOPS_PR_URL>/$prId"
+        $prInfo = "**PR_ID**: <a href='$prUrl'>#$prId</a><br>"
+      } else {
+        $prInfo = "**PR_ID**: - <br>"
+      }
+      $text = "**Run Time**: $runTime (Cairo)<br>" +
+              "**Trigger**: $env:BUILD_REASON<br>" +
+              "**Branch**: $env:BUILD_SOURCEBRANCHNAME<br>" + $prInfo +
+              "**Status**: $env:AGENT_JOBSTATUS<br>" +
+              "**Passed**: $(passedTests)<br>" +
+              "**Failed**: $(failedTests)<br>" +
+              "**Skipped**: $(skippedTests)<br><br>" +
+              "<b>Allure Report</b><br>" +
+              "<a href='$runUrl'>Open Pipeline Run</a>"
+
+      $message = @{
+        "title" = "Web Portal Test Run Summary"
+        "text"  = $text
+      } | ConvertTo-Json -Compress
+
+      $uri = '<REPLACE_WITH_YOUR_TEAMS_WEBHOOK_URL>'
+
+      Invoke-RestMethod -Method Post -ContentType 'application/json' -Body $message -Uri $uri
+    displayName: "Send Teams Notification"
+    condition: always()

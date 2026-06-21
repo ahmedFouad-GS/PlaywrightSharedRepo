@@ -1,0 +1,157 @@
+name: Web Portal Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 540
+
+    env:
+      TEST_SUMMARY_FILE: playwright-report/results.json
+      ALLURE_MODE: zip
+
+    steps:
+    # -----------------------
+    # Checkout
+    # -----------------------
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # -----------------------
+    # Node setup
+    # -----------------------
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    # -----------------------
+    # Install dependencies
+    # -----------------------
+    - name: Install dependencies
+      run: |
+        if [ -f package-lock.json ]; then
+          npm ci
+        else
+          npm install
+        fi
+
+    - name: Install Playwright browsers
+      run: npx playwright install --with-deps
+
+    - name: Install Allure CLI
+      run: npm install -D allure-commandline
+
+    # -----------------------
+    # Detect PR (GitHub equivalent)
+    # -----------------------
+    - name: Detect PR
+      id: pr
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const branch = context.ref.replace('refs/heads/', '');
+
+          const pulls = await github.rest.pulls.list({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            head: `${context.repo.owner}:${branch}`,
+            base: 'main',
+            state: 'open'
+          });
+
+          if (pulls.data.length > 0) {
+            const pr = pulls.data[0];
+            core.setOutput('detected', 'true');
+            core.setOutput('prId', pr.number);
+            core.setOutput('prUrl', pr.html_url);
+          } else {
+            core.setOutput('detected', 'false');
+          }
+
+    # -----------------------
+    # Run tests
+    # -----------------------
+    - name: Run Playwright Tests
+      run: |
+        echo "Running tests..."
+        npm run test || true
+
+    # -----------------------
+    # Extract Playwright stats
+    # -----------------------
+    - name: Extract Test Counts
+      if: always()
+      run: |
+        FILE=playwright-report/results.json
+
+        if [ ! -f "$FILE" ]; then
+          echo "No results.json found"
+          exit 1
+        fi
+
+        passed=$(jq '.stats.expected + .stats.flaky' $FILE)
+        failed=$(jq '.stats.unexpected' $FILE)
+        skipped=$(jq '.stats.skipped' $FILE)
+
+        echo "passed=$passed" >> $GITHUB_ENV
+        echo "failed=$failed" >> $GITHUB_ENV
+        echo "skipped=$skipped" >> $GITHUB_ENV
+
+    # -----------------------
+    # Archive Allure folder
+    # -----------------------
+    - name: Generate Allure Report
+      run: npx allure generate ./allure-results --clean -o allure-report
+
+    - name: Zip Allure Report
+      run: |
+        zip -r allure-report.zip allure-report
+
+    - name: Upload Allure Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AllureReportZip
+        path: allure-report.zip
+
+    # -----------------------
+    # Teams Notification
+    # -----------------------
+    - name: Send Teams Notification
+      if: always()
+      run: |
+        RUN_TIME=$(date -u +"%Y-%m-%d %H:%M")
+
+        PR_ID="${{ steps.pr.outputs.prId }}"
+        PR_URL="${{ steps.pr.outputs.prUrl }}"
+
+        if [ "${{ steps.pr.outputs.detected }}" == "true" ]; then
+          PR_INFO="PR_ID: <a href='$PR_URL'>#$PR_ID</a><br>"
+        else
+          PR_INFO="PR_ID: -<br>"
+        fi
+
+        TEXT="Run Time: $RUN_TIME (UTC)<br>\
+Trigger: $GITHUB_EVENT_NAME<br>\
+Branch: $GITHUB_REF_NAME<br>\
+$PR_INFO\
+Passed: $passed<br>\
+Failed: $failed<br>\
+Skipped: $skipped<br><br>\
+<b>Pipeline Run</b><br>\
+https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+        curl -H "Content-Type: application/json" \
+        -d "{
+          \"title\": \"Web Portal Test Run Summary\",
+          \"text\": \"$TEXT\"
+        }" \
+        ${{ secrets.TEAMS_WEBHOOK_URL }}

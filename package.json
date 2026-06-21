@@ -1,0 +1,25 @@
+{
+  "name": "playwrightsharedrepo",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test:web": "playwright test tests/webTests/ --project=test",
+    "stg:web": "playwright test tests/webTests/ --project=stg",
+    "test:mob": "playwright test tests/mobileTests/ --project=test",
+    "stg:mob": "playwright test tests/mobileTests/ --project=stg",
+    "test:webfile": "playwright test --project=test",
+    "stg:webfile": "playwright test --project=stg",
+    "test:mobfile": "playwright test --project=test",
+    "stg:mobfile": "playwright test --project=stg"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.61.0",
+    "@types/node": "^26.0.0",
+    "allure-playwright": "^3.10.0"
+  }
+}
