@@ -29,23 +29,22 @@ class BaseApi {
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
-  // Creates a pre-configured APIRequestContext with baseURL and auth headers.
-  // Pass extraHTTPHeaders to add headers for the entire context.
+  static async create(userKey = 'default', options = {}) {
 
-  static async create(options = {}) {
-    const token = tokenStore.getToken();
+    const token = tokenStore.getToken(userKey);
+
     if (!token)
-      throw new Error('Access token not initialized');
+      throw new Error(`Token for "${userKey}" not found`);
 
     const context = await playwrightRequest.newContext({
       baseURL: process.env.PW_API_BASE_URL,
 
       extraHTTPHeaders: {
         Authorization: `Bearer ${token}`,
-        ...options.extraHTTPHeaders,
+        ...options.extraHTTPHeaders
       },
 
-      ignoreHTTPSErrors: true,
+      ignoreHTTPSErrors: true
     });
 
     return new this(context);
@@ -57,13 +56,27 @@ class BaseApi {
   // Usage:
   //   await MyApi.run(api => api.deleteItem(id));
   //   await MyApi.run(api => api.getSomething(), { extraHTTPHeaders: { 'Accept-Language': 'ar' } });
-  static async run(callback, options = {}) {
-    const api = await this.create(options);
+  // 
+  static async run(callback, userKey = 'default', options = {}) {
+    const api = await this.create(userKey, options);
     try {
       return await callback(api);
     } finally {
       await api.dispose();
     }
+  }
+
+  // Executes API calls as a specific user.
+  //
+  // Example:
+  //
+  // await ShiftApi.runAs(
+  //     'operator',
+  //     api => api.createShift()
+  // );
+  //
+  static async runAs(userKey, callback, options = {}) {
+    return this.run(callback, userKey, options);
   }
 
   // Closes the underlying request context — called automatically by run().
@@ -118,6 +131,7 @@ class BaseApi {
   get(endpoint, options) { return this.request('get', endpoint, options); }
   post(endpoint, options) { return this.request('post', endpoint, options); }
   put(endpoint, options) { return this.request('put', endpoint, options); }
+  patch(endpoint, options) { return this.request('patch', endpoint, options); }
   delete(endpoint, options) { return this.request('delete', endpoint, options); }
 }
 
