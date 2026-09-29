@@ -1,5 +1,5 @@
 # Introduction 
-This is an automation project for Remat project. Currently it's GUI automation with a plan to include mobile and API automation.
+This is an automation framewrok base project. It's designed to handle Web GUI , Mobile GUI and Apis with integrted pipeline.
 
 # Setup
 1. Install Node.js®
