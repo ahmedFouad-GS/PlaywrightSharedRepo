@@ -1,27 +1,43 @@
-const { test: base, request } = require('@playwright/test');
+const { test: base, request, chromium } = require('@playwright/test');
 const { readTestData } = require('../utils/testData.js');
-const tokenStore = require('../utils/tokenStore');
+const tokenStore = require('../utils/tokenStore.js');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AUTH FIXTURE
 //
-// Provides authenticated Playwright pages for all test files.
+// Provides authenticated Playwright pages and API users for all test files.
 // Authentication is done directly against Keycloak via HTTP — no browser UI.
 //
 // How it works:
 //   1. loginViaApi()       — POST credentials to Keycloak, get SSO cookies back
-//   2. createAuthContext() — inject cookies into a browser context, navigate to app
+//   2. createAuthContext() — inject cookies into a browser context
 //   3. authenticate()      — combines steps 1 and 2 into one call
-//   4. authenticatedPage   — Playwright fixture that runs 1-3 before each test
-//                            and closes the context after
+//   4. authenticatedPage   — logs in the default user (Admin)
+//   5. authenticateApiUser — logs in additional users for API usage and
+//                             automatically closes their contexts after the test
 //
-// Usage in test files:
-//   const { test } = require('../../fixtures/authFixture.js');
-//   test('my test', async ({ authenticatedPage }) => { ... });
+// Usage:
+//
+//   const { test } = require('../../fixtures/authFixture');
+//
+//   test('my test', async ({
+//     authenticatedPage,
+//     authenticateApiUser
+//   }) => {
+//     await authenticateApiUser(
+//       'operator',
+//       operatorUsername,
+//       operatorPassword
+//     );
+//
+//     await MyApi.runAs(
+//       'operator',
+//       api => api.doSomething()
+//     );
+//   });
 // ─────────────────────────────────────────────────────────────────────────────
 
-
-// Env config cached once at module load — process.env never changes during a run
+// Env config cached once at module load
 const ENV = {
   keycloakUrl: process.env.PW_KEYCLOAK_URL,
   keycloakRealm: process.env.PW_KEYCLOAK_REALM,
@@ -30,42 +46,156 @@ const ENV = {
   envName: process.env.PW_ENV_NAME,
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Keycloak Authentication
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Keycloak API Login ───────────────────────────────────────────────────────
-// Authenticates directly with Keycloak — no browser window, no UI interaction.
-// Returns a Playwright storageState object (cookies in memory, no file written).
-//
-// How it works:
-//   - GET  the Keycloak login page to retrieve the form action URL (one-time token)
-//   - POST username + password to that URL
-//   - On success, Keycloak redirects away from /login-actions/ → we collect SSO cookies
-//   - On failure (wrong credentials), Keycloak stays on /login-actions/ → we throw
-
-// Builds the Keycloak authorization endpoint URL that triggers the login page
 function buildKeycloakAuthUrl() {
-  return `${ENV.keycloakUrl}/realms/${ENV.keycloakRealm}/protocol/openid-connect/auth` +
+  return (
+    `${ENV.keycloakUrl}/realms/${ENV.keycloakRealm}/protocol/openid-connect/auth` +
     `?client_id=${encodeURIComponent(ENV.keycloakClientId)}` +
     `&redirect_uri=${encodeURIComponent(ENV.baseURL)}` +
-    `&response_type=code&scope=openid&response_mode=fragment`;
+    `&response_type=code&scope=openid&response_mode=fragment`
+  );
 }
 
-async function loginViaApi(username, password) {
-  const apiContext = await request.newContext({ ignoreHTTPSErrors: true });
+async function loginViaApi(
+  username,
+  password,
+  newPassword = null
+) {
+  const apiContext = await request.newContext({
+    ignoreHTTPSErrors: true,
+  });
+
   try {
-    const loginPageResponse = await apiContext.get(buildKeycloakAuthUrl());
-    const html = await loginPageResponse.text();
+    // Open Keycloak login page
+    const loginPageResponse =
+      await apiContext.get(
+        buildKeycloakAuthUrl()
+      );
 
-    const actionMatch = html.match(/action="([^"]+)"/);
-    if (!actionMatch) throw new Error(`Keycloak form action not found for "${username}"`);
-    const formAction = actionMatch[1].replace(/&amp;/g, '&');
+    const loginPageHtml =
+      await loginPageResponse.text();
 
-    const postResponse = await apiContext.post(formAction, {
-      form: { username, password, credentialId: '' },
-    });
+    const loginActionMatch =
+      loginPageHtml.match(
+        /action="([^"]+)"/
+      );
 
-    const finalUrl = postResponse.url();
-    if (finalUrl.includes('/login-actions/') && !finalUrl.includes('required-action'))
-      throw new Error(`Keycloak login failed for "${username}" — invalid credentials or account locked`);
+    if (!loginActionMatch) {
+      throw new Error(
+        `Keycloak form action not found for "${username}".`
+      );
+    }
+
+    const loginAction =
+      loginActionMatch[1].replace(
+        /&amp;/g,
+        '&'
+      );
+
+    // Submit username/password
+    let response =
+      await apiContext.post(
+        loginAction,
+        {
+          form: {
+            username,
+            password,
+            credentialId: '',
+          },
+        }
+      );
+
+    let finalUrl = response.url();
+    let responseHtml =
+      await response.text();
+
+
+    // -------------------------------------------------------
+    // First login → update password
+    // -------------------------------------------------------
+    const requiresPasswordUpdate =
+      finalUrl.includes(
+        'execution=UPDATE_PASSWORD'
+      ) ||
+      responseHtml.includes(
+        'password-new'
+      );
+
+    if (requiresPasswordUpdate) {
+      if (!newPassword) {
+        throw new Error(
+          `User "${username}" must change password, but no new password was provided.`
+        );
+      }
+
+      const passwordActionMatch =
+        responseHtml.match(
+          /action="([^"]+)"/
+        );
+
+      if (!passwordActionMatch) {
+        throw new Error(
+          `Password update form action not found for "${username}".`
+        );
+      }
+
+      const passwordAction =
+        passwordActionMatch[1].replace(
+          /&amp;/g,
+          '&'
+        );
+
+      response =
+        await apiContext.post(
+          passwordAction,
+          {
+            form: {
+              'password-new':
+                newPassword,
+              'password-confirm':
+                newPassword,
+            },
+          }
+        );
+
+      finalUrl = response.url();
+      responseHtml =
+        await response.text();
+
+      // If still on UPDATE_PASSWORD page,
+      // password policy probably failed.
+      if (
+        finalUrl.includes(
+          'execution=UPDATE_PASSWORD'
+        )
+      ) {
+        throw new Error(
+          `Password update failed for "${username}".`
+        );
+      }
+    }
+
+    // -------------------------------------------------------
+    // Invalid credentials
+    // -------------------------------------------------------
+    if (
+      responseHtml.includes(
+        'Email or Username and password that you’ve entered don’t match any profile'
+      ) ||
+      responseHtml.includes(
+        'Invalid username or password'
+      ) ||
+      responseHtml.includes(
+        'Invalid credentials'
+      )
+    ) {
+      throw new Error(
+        `Keycloak login failed for "${username}" - invalid credentials.`
+      );
+    }
 
     return await apiContext.storageState();
   } finally {
@@ -73,88 +203,253 @@ async function loginViaApi(username, password) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Browser Context Factory
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Browser Context Factory ──────────────────────────────────────────────────
-// Creates a browser context pre-loaded with SSO cookies, sets language to English,
-// navigates to the app, and waits until past the Keycloak login page.
-// Returns { context, page } — context is needed for teardown, page for the test.
-
-// Listens on the context for the first Bearer token in any request header.
-// Fires exactly once then removes itself — token stored for BaseApi subclasses.
-function setupTokenCapture(context) {
+function setupTokenCapture(
+  context,
+  userKey = 'default'
+) {
   const handler = req => {
-    const auth = req.headers()['authorization'];
+    const auth =
+      req.headers()['authorization'];
+
     if (auth?.startsWith('Bearer ')) {
-      tokenStore.setToken(auth.slice(7));
+      tokenStore.setToken(
+        userKey,
+        auth.slice(7)
+      );
+
       context.off('request', handler);
     }
   };
+
   context.on('request', handler);
 }
 
-async function createAuthContext(browser, storageState, captureToken = false) {
-  const context = await browser.newContext({ storageState, ignoreHTTPSErrors: true, permissions: [] });
-
-
-  if (captureToken) setupTokenCapture(context);
-
-  await context.addInitScript(() => {
-    if (!localStorage.getItem('r-lang')) localStorage.setItem('r-lang', 'en');
-    if (!localStorage.getItem('r-session-lang')) localStorage.setItem('r-session-lang', 'en');
+async function createAuthContext(
+  browser,
+  storageState,
+  captureToken = false,
+  userKey = 'default'
+) {
+  const context = await browser.newContext({
+    storageState,
+    ignoreHTTPSErrors: true,
+    permissions: [],
   });
 
-  const page = await context.newPage();
+  if (captureToken) {
+    setupTokenCapture(
+      context,
+      userKey
+    );
+  }
+
+  await context.addInitScript(() => {
+    if (!localStorage.getItem('r-lang')) {
+      localStorage.setItem(
+        'r-lang',
+        'en'
+      );
+    }
+
+    if (!localStorage.getItem('r-session-lang')) {
+      localStorage.setItem(
+        'r-session-lang',
+        'en'
+      );
+    }
+  });
+
+  const page =
+    await context.newPage();
+
   await page.goto(ENV.baseURL);
-  await page.waitForURL(url => !url.href.includes('keycloak'), { timeout: 60_000 });
-  await page.waitForLoadState('networkidle');
+
+  await page.waitForURL(
+    url => !url.href.includes('keycloak'),
+    { timeout: 60_000 }
+  );
+
+  await page.waitForLoadState(
+    'networkidle'
+  );
 
   return { context, page };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Helper
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Combined Login ───────────────────────────────────────────────────────────
-// Runs loginViaApi + createAuthContext in one call.
-// Used internally by loginAs() and the authenticatedPage fixture.
+async function authenticate(
+  browser,
+  username,
+  password,
+  captureToken = false,
+  userKey = 'default'
+) {
+  const storageState =
+    await loginViaApi(
+      username,
+      password
+    );
 
-async function authenticate(browser, username, password, captureToken = false) {
-  const storageState = await loginViaApi(username, password);
-  return createAuthContext(browser, storageState, captureToken);
+  return createAuthContext(
+    browser,
+    storageState,
+    captureToken,
+    userKey
+  );
 }
+async function authenticateApiOnly(
+  userKey,
+  username,
+  password,
+  newPassword = null
+) {
+  const browser =
+    await chromium.launch({
+      headless: true,
+    });
 
+  try {
+    const storageState =
+      await loginViaApi(
+        username,
+        password,
+        newPassword
+      );
 
-// ─── Login Helper ─────────────────────────────────────────────────────────────
-// Generic login for any user — used in beforeAll-pattern files and permission tests.
-// Does NOT capture the Bearer token — only the admin fixture should do that.
-//
-// Usage:
-//   const loginData = readTestData('LoginTestData.json');
-//   page = await loginAs(browser, loginData.username, loginData.password);
+    const context =
+      await browser.newContext({
+        storageState,
+        ignoreHTTPSErrors: true,
+      });
 
-async function loginAs(browser, username, password) {
-  const { page } = await authenticate(browser, username, password, false);
+    setupTokenCapture(
+      context,
+      userKey
+    );
+
+    const page =
+      await context.newPage();
+
+    await page.goto(ENV.baseURL);
+
+    await page.waitForURL(
+      url =>
+        !url.href.includes(
+          'keycloak'
+        ),
+      {
+        timeout: 60_000,
+      }
+    );
+
+    await page.waitForLoadState(
+      'networkidle'
+    );
+
+    await page.waitForTimeout(
+      1000
+    );
+
+    const token =
+      tokenStore.getToken(
+        userKey
+      );
+
+    if (!token) {
+      throw new Error(
+        `Failed to capture token for user "${userKey}".`
+      );
+    }
+  } finally {
+    await browser.close();
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// Login Helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function loginAs(
+  browser,
+  username,
+  password
+) {
+  const { page } =
+    await authenticate(
+      browser,
+      username,
+      password
+    );
+
   return page;
 }
 
-
-// ─── Fixture ──────────────────────────────────────────────────────────────────
-// authenticatedPage — logs in as admin before each test, closes context after.
-// Captures the Bearer token so BaseApi subclasses can make authenticated API calls.
-//
-// For tests that need a different user, call loginAs() directly inside the test:
-//   test('no perm', async ({ browser }) => {
-//     const noPermPage = await loginAs(browser, username, password);
-//     try { ... } finally { await noPermPage.context().close(); }
-//   });
+// ─────────────────────────────────────────────────────────────────────────────
+// Fixtures
+// ─────────────────────────────────────────────────────────────────────────────
 
 const test = base.extend({
   authenticatedPage: async ({ browser }, use) => {
-    if (!ENV.keycloakUrl || !ENV.keycloakRealm || !ENV.keycloakClientId)
-      throw new Error(`Keycloak not configured for environment "${ENV.envName || 'unknown'}"`);
-    const { username, password } = readTestData('LoginTestData.json');
-    const { context, page } = await authenticate(browser, username, password, true);
-    await use(page);
-    await context.close();
+    if (
+      !ENV.keycloakUrl ||
+      !ENV.keycloakRealm ||
+      !ENV.keycloakClientId
+    ) {
+      throw new Error(
+        `Keycloak not configured for environment "${ENV.envName || 'unknown'}"`
+      );
+    }
+
+    const {
+      username,
+      password,
+    } = readTestData(
+      'LoginTestData.json'
+    );
+
+    const {
+      context,
+      page,
+    } = await authenticate(
+      browser,
+      username,
+      password,
+      true
+    );
+
+    try {
+      await use(page);
+    } finally {
+      await context.close();
+    }
+  },
+
+  authenticateApiUser: async ({ }, use) => {
+    const login = async (
+      userKey,
+      username,
+      password,
+      newPassword = null
+    ) => {
+      await authenticateApiOnly(
+        userKey,
+        username,
+        password,
+        newPassword
+      );
+    };
+
+    await use(login);
   },
 });
 
-module.exports = { test, loginAs };
+module.exports = {
+  test,
+  loginAs,
+};
