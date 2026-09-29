@@ -5,22 +5,22 @@ const envConfigs = {
   test: {
     metadata: {
       envName: 'TST-',
-      keycloakUrl: 'https://keycloak.remat.test.local',
-      keycloakRealm: 'RematDev',
-      keycloakClientId: 'RematAdminPortal',
-      apiBaseUrl: 'https://wso2-gateway.remat.test.local/',
+      keycloakUrl: '',
+      keycloakRealm: '',
+      keycloakClientId: '',
+      apiBaseUrl: '',
     },
-    baseURL: 'https://app.remat.test.local/',
+    baseURL: '',
   },
   stg: {
     metadata: {
       envName: 'STG-',
-      keycloakUrl: 'https://keycloak.investor01-stg.riyadhparking.sa',
-      keycloakRealm: 'RematDev',
-      keycloakClientId: 'RematAdminPortal',
-      apiBaseUrl: 'https://app.investor01-stg.riyadhparking.sa/api/',
+      keycloakUrl: '',
+      keycloakRealm: '',
+      keycloakClientId: '',
+      apiBaseUrl: '',
     },
-    baseURL: 'https://app.investor01-stg.riyadhparking.sa',
+    baseURL: '',
   },
 };
 
