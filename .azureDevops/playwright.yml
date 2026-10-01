@@ -19,11 +19,11 @@ jobs:
       $branch = $env:BUILD_SOURCEBRANCH.Replace("refs/heads/","")
       Write-Host "Checking if branch '$branch' has an active PR to main..."
 
-      $org = "GSIntegrationTeam"
-      $project = "REMAT"
-      $repo = "RematAutomationTesting"
+      $org = <replace with org name>
+      $project = <replace with project name>
+      $repo = <replace with repo name>
 
-      $url = "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/pullrequests?searchCriteria.sourceRefName=refs/heads/$branch&searchCriteria.targetRefName=refs/heads/main&searchCriteria.status=active&api-version=7.0"
+      $url = <replace with pr urls>
 
       $headers = @{
         Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN"
